@@ -10,11 +10,12 @@ from __future__ import annotations
 import uuid
 
 import structlog
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.db.models.ingestion import IngestionRecord
 from backend.app.db.models.normalized_segment import NormalizedSegmentRecord
+from backend.app.metrics import REGISTRY, timed
 from backend.app.normalization.models import NormalizationResult
 from backend.app.normalization.pipeline import run_normalization_pipeline
 
@@ -39,6 +40,8 @@ async def normalize_ingestion(
         If the ingestion is not found or is in an invalid state for
         normalization.
     """
+    REGISTRY.increment("normalize_requests_total")
+
     # ── Fetch the ingestion (row-level lock to prevent concurrent re-runs) ────
     # with_for_update() acquires a SELECT FOR UPDATE lock so that a second
     # concurrent request for the same ingestion_id waits rather than running
@@ -51,14 +54,17 @@ async def normalize_ingestion(
     record: IngestionRecord | None = result.scalar_one_or_none()
 
     if record is None:
+        REGISTRY.increment("normalize_errors_total")
         raise NormalizationError(f"Ingestion {ingestion_id} not found")
 
     if record.status == "normalizing":
+        REGISTRY.increment("normalize_errors_total")
         raise NormalizationError(
             f"Ingestion {ingestion_id} is already being normalised"
         )
 
     if record.status == "normalized":
+        REGISTRY.increment("normalize_errors_total")
         raise NormalizationError(
             f"Ingestion {ingestion_id} has already been normalised. "
             "Delete existing segments and reset status to re-run."
@@ -71,13 +77,15 @@ async def normalize_ingestion(
 
     # ── Run pipeline ──────────────────────────────────────────────────────────
     try:
-        norm_result = run_normalization_pipeline(
-            ingestion_id=ingestion_id,
-            page_html=record.page_html,
-            selected_text=record.selected_text,
-            max_segments=max_segments,
-        )
+        with timed("normalization_duration_s"):
+            norm_result = run_normalization_pipeline(
+                ingestion_id=ingestion_id,
+                page_html=record.page_html,
+                selected_text=record.selected_text,
+                max_segments=max_segments,
+            )
     except Exception as exc:
+        REGISTRY.increment("normalize_errors_total")
         record.status = "error"
         record.normalization_error = str(exc)
         await db.flush()
@@ -114,6 +122,8 @@ async def normalize_ingestion(
     record.status = "normalized"
     await db.flush()
 
+    REGISTRY.observe("segments_per_ingestion", float(len(db_segments)))
+
     logger.info(
         "normalization.persisted",
         ingestion_id=str(ingestion_id),
@@ -132,10 +142,14 @@ async def retry_normalize_ingestion(
     Retry normalization for an ingestion that previously failed with status
     ``error``.
 
-    Resets the record to ``received`` and re-runs the pipeline.  Only
-    ingestions in ``error`` state are accepted; all other states raise
-    ``NormalizationError``.
+    Before re-running, any partially-written normalized_segments rows for this
+    ingestion are deleted.  This guards against duplicate-key errors that would
+    occur if the pipeline had flushed some segments before the error was
+    recorded.  Only ingestions in ``error`` state are accepted; all other
+    states raise ``NormalizationError``.
     """
+    REGISTRY.increment("normalize_retry_total")
+
     result = await db.execute(
         select(IngestionRecord)
         .where(IngestionRecord.id == ingestion_id)
@@ -157,6 +171,24 @@ async def retry_normalize_ingestion(
         ingestion_id=str(ingestion_id),
         previous_error=record.normalization_error,
     )
+
+    # ── Defensive cleanup ─────────────────────────────────────────────────────
+    # A pipeline crash after partial segment flush leaves orphaned rows in
+    # normalized_segments.  DELETE them before resetting status so the main
+    # normalization path cannot hit a unique-constraint violation on
+    # (ingestion_id, segment_index).
+    deleted = await db.execute(
+        delete(NormalizedSegmentRecord).where(
+            NormalizedSegmentRecord.ingestion_id == ingestion_id
+        )
+    )
+    orphan_count: int = deleted.rowcount  # type: ignore[assignment]
+    if orphan_count:
+        logger.warning(
+            "normalization.retry.orphans_deleted",
+            ingestion_id=str(ingestion_id),
+            orphan_count=orphan_count,
+        )
 
     record.status = "received"
     record.normalization_error = None

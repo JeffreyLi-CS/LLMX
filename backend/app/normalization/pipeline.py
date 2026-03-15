@@ -37,6 +37,13 @@ from backend.app.normalization.unicode_detector import detect_suspicious_unicode
 
 logger: structlog.stdlib.BoundLogger = structlog.get_logger(__name__)
 
+# Maximum number of suspicious indicators stored per segment.  A single
+# obfuscation-dense segment can produce hundreds of pattern matches; without a
+# cap the JSONB column can balloon to tens of KB and the downstream classifier
+# prompt grows unbounded.  Indicators beyond the cap are dropped (the segment
+# is still flagged as suspicious via has_suspicious_content).
+MAX_INDICATORS_PER_SEGMENT: int = 50
+
 
 # ---------------------------------------------------------------------------
 # Pipeline entry point
@@ -205,6 +212,17 @@ def _build_segment(
 
     # Sort by start offset for deterministic output.
     indicators.sort(key=lambda x: x.char_offset_start)
+
+    # Enforce per-segment cap.  Indicators are sorted by offset so we keep
+    # the first MAX_INDICATORS_PER_SEGMENT, which are the earliest in the text.
+    if len(indicators) > MAX_INDICATORS_PER_SEGMENT:
+        logger.warning(
+            "normalization.indicators.truncated",
+            provenance=provenance.value,
+            original_count=len(indicators),
+            cap=MAX_INDICATORS_PER_SEGMENT,
+        )
+        indicators = indicators[:MAX_INDICATORS_PER_SEGMENT]
 
     normalized_text = _normalize_text(raw_text)
 

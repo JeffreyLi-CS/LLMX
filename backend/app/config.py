@@ -53,6 +53,16 @@ class Settings(BaseSettings):
     # more are truncated with a warning so one large page can't exhaust memory.
     max_segments_per_ingestion: int = 2000
 
+    # ── Classification ────────────────────────────────────────────────────────
+    # OpenAI API key.  Optional — classification endpoints return 503 when absent.
+    openai_api_key: str | None = None
+    # Model used for semantic classification.
+    classifier_model: str = "gpt-4o-mini"
+    # Maximum tokens in the classifier completion response.
+    max_classification_tokens: int = 1024
+    # Per-request timeout for the classification provider (seconds).
+    classifier_timeout_s: float = 30.0
+
     @model_validator(mode="after")
     def _validate_secrets(self) -> Settings:
         if self.app_env == "production":

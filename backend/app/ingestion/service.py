@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.app.config import Settings
 from backend.app.db.models.ingestion import IngestionRecord
 from backend.app.ingestion.models import IngestionCreate
+from backend.app.metrics import REGISTRY
 
 logger: structlog.stdlib.BoundLogger = structlog.get_logger(__name__)
 
@@ -32,12 +33,15 @@ async def create_ingestion(
     IngestionValidationError
         If the payload exceeds configured size limits.
     """
+    REGISTRY.increment("ingest_requests_total")
+
     # ── Server-side size enforcement ──────────────────────────────────────────
     # Pydantic already enforces the hard-coded caps in the model, but we also
     # enforce the operator-configured limits from Settings so they can be
     # tightened without a code change.
     html_bytes = len(payload.page_html.encode("utf-8"))
     if html_bytes > settings.max_html_size_bytes:
+        REGISTRY.increment("ingest_errors_total")
         raise IngestionValidationError(
             f"page_html exceeds the configured limit of "
             f"{settings.max_html_size_bytes} bytes (received {html_bytes})"
@@ -46,6 +50,7 @@ async def create_ingestion(
     if payload.selected_text is not None:
         st_bytes = len(payload.selected_text.encode("utf-8"))
         if st_bytes > settings.max_selected_text_bytes:
+            REGISTRY.increment("ingest_errors_total")
             raise IngestionValidationError(
                 f"selected_text exceeds the configured limit of "
                 f"{settings.max_selected_text_bytes} bytes (received {st_bytes})"
