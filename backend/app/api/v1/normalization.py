@@ -19,7 +19,7 @@ from typing import Annotated
 import structlog
 from fastapi import APIRouter, HTTPException, Path, status
 
-from backend.app.dependencies import DBSession, RequireAPIKey
+from backend.app.dependencies import DBSession, RequireAPIKey, SettingsDep
 from backend.app.normalization.models import NormalizationResult
 from backend.app.normalization.service import NormalizationError, normalize_ingestion
 
@@ -46,9 +46,14 @@ IngestionIDPath = Annotated[uuid.UUID, Path(description="UUID returned by POST /
 async def normalize(
     ingestion_id: IngestionIDPath,
     db: DBSession,
+    settings: SettingsDep,
 ) -> NormalizationResult:
     try:
-        result = await normalize_ingestion(ingestion_id=ingestion_id, db=db)
+        result = await normalize_ingestion(
+            ingestion_id=ingestion_id,
+            db=db,
+            max_segments=settings.max_segments_per_ingestion,
+        )
     except NormalizationError as exc:
         msg = str(exc)
         if "not found" in msg.lower():

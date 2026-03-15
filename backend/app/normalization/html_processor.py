@@ -64,8 +64,13 @@ _RE_FONT_SIZE_ZERO = re.compile(r"font-size\s*:\s*0(?:px|pt|em|rem)?\b", re.I)
 _RE_OVERFLOW_HIDDEN = re.compile(r"overflow\s*:\s*hidden", re.I)
 _RE_WIDTH_ZERO = re.compile(r"\bwidth\s*:\s*0(?:px)?\b", re.I)
 _RE_HEIGHT_ZERO = re.compile(r"\bheight\s*:\s*0(?:px)?\b", re.I)
-# Very negative position: left/top <= -999px
-_RE_OFFSCREEN = re.compile(r"(?:left|top)\s*:\s*-(?:\d{3,}|\d+(?:\.\d+)?(?:px|em|rem))", re.I)
+# Very negative position: left/top with absolute value >= 100 (any unit or bare).
+# Requires 3+ digits before the optional unit to avoid flagging -1px / -2em,
+# which are used in legitimate micro-adjustments.
+_RE_OFFSCREEN = re.compile(
+    r"(?:left|top)\s*:\s*-[0-9]{3,}(?:\.[0-9]+)?(?:px|em|rem|%|vw|vh)?(?![0-9A-Za-z])",
+    re.I,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -281,9 +286,31 @@ def _extract_visible_blocks(
     Strategy: walk block-level elements in document order.  For each block
     that is not inside a skipped or hidden container, collect its direct text
     (excluding the text of any nested block — those will be their own entries).
+
+    Additionally captures bare NavigableString children of the <body> element
+    (text that is not wrapped in any HTML element) so top-level injected text
+    is not silently discarded.
     """
     results: list[TextBlock] = []
     body = soup.find("body") or soup
+
+    if not isinstance(body, Tag):
+        return results
+
+    # ── Bare text nodes directly under <body> ─────────────────────────────────
+    # Text nodes at body level (not inside any element) are valid injection
+    # surfaces and must not be dropped silently.
+    for child in body.children:
+        if isinstance(child, NavigableString) and not isinstance(child, Comment):
+            text = str(child).strip()
+            if text:
+                results.append(
+                    TextBlock(
+                        tag_name="body",
+                        source_hint="body#text",
+                        text=text,
+                    )
+                )
 
     def _walk(node: Tag) -> None:
         for child in node.children:
@@ -318,5 +345,5 @@ def _extract_visible_blocks(
             else:
                 _walk(child)
 
-    _walk(body if isinstance(body, Tag) else soup)  # type: ignore[arg-type]
+    _walk(body)
     return results

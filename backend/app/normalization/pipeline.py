@@ -48,6 +48,7 @@ def run_normalization_pipeline(
     ingestion_id: uuid.UUID,
     page_html: str,
     selected_text: str | None,
+    max_segments: int = 2000,
 ) -> NormalizationResult:
     """
     Run the full normalization pipeline and return a NormalizationResult.
@@ -147,6 +148,16 @@ def run_normalization_pipeline(
             )
             segments.append(seg)
             index += 1
+
+    # ── Segment cap ───────────────────────────────────────────────────────────
+    if len(segments) > max_segments:
+        logger.warning(
+            "normalization.pipeline.segment_cap_exceeded",
+            ingestion_id=str(ingestion_id),
+            total_before_cap=len(segments),
+            cap=max_segments,
+        )
+        segments = segments[:max_segments]
 
     hidden_count = sum(1 for s in segments if s.hidden)
     suspicious_count = sum(1 for s in segments if s.has_suspicious_content)

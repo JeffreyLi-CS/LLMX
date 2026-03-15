@@ -29,6 +29,7 @@ class NormalizationError(Exception):
 async def normalize_ingestion(
     ingestion_id: uuid.UUID,
     db: AsyncSession,
+    max_segments: int = 2000,
 ) -> NormalizationResult:
     """
     Run the normalization pipeline for the given ingestion and persist results.
@@ -39,11 +40,15 @@ async def normalize_ingestion(
         If the ingestion is not found or is in an invalid state for
         normalization.
     """
-    # ── Fetch the ingestion ───────────────────────────────────────────────────
+    # ── Fetch the ingestion (row-level lock to prevent concurrent re-runs) ────
+    # with_for_update() acquires a SELECT FOR UPDATE lock so that a second
+    # concurrent request for the same ingestion_id waits rather than running
+    # the pipeline twice.  The lock is held for the duration of the transaction.
     result = await db.execute(
         select(IngestionRecord)
         .where(IngestionRecord.id == ingestion_id)
         .options(selectinload(IngestionRecord.segments))
+        .with_for_update()
     )
     record: IngestionRecord | None = result.scalar_one_or_none()
 
@@ -72,6 +77,7 @@ async def normalize_ingestion(
             ingestion_id=ingestion_id,
             page_html=record.page_html,
             selected_text=record.selected_text,
+            max_segments=max_segments,
         )
     except Exception as exc:
         record.status = "error"

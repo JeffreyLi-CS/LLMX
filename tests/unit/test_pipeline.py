@@ -197,3 +197,56 @@ def test_normalize_text_preserves_zero_width_chars():
     text = "word\u200bword"
     normalized = _normalize_text(text)
     assert "\u200b" in normalized
+
+
+# ---------------------------------------------------------------------------
+# Segment cap
+# ---------------------------------------------------------------------------
+
+
+def test_segment_cap_truncates_large_page():
+    # Generate a page with more paragraphs than the cap.
+    paras = "".join(f"<p>Paragraph number {i}</p>" for i in range(50))
+    html = f"<html><body>{paras}</body></html>"
+    result = run_normalization_pipeline(
+        ingestion_id=uuid.uuid4(),
+        page_html=html,
+        selected_text=None,
+        max_segments=10,
+    )
+    assert result.segment_count <= 10
+    assert len(result.segments) <= 10
+
+
+def test_segment_cap_not_hit_on_normal_page():
+    html = "<html><body><p>One</p><p>Two</p><p>Three</p></body></html>"
+    result = run_normalization_pipeline(
+        ingestion_id=uuid.uuid4(),
+        page_html=html,
+        selected_text=None,
+        max_segments=2000,
+    )
+    assert result.segment_count <= 2000
+
+
+# ---------------------------------------------------------------------------
+# Bare body-level text propagation through pipeline
+# ---------------------------------------------------------------------------
+
+
+def test_bare_body_text_appears_as_visible_body_segment():
+    html = "<html><body>Top-level injection text<p>Normal</p></body></html>"
+    result = run(html)
+    visible = [s for s in result.segments if s.provenance == Provenance.VISIBLE_BODY]
+    all_text = " ".join(s.raw_text for s in visible)
+    assert "Top-level injection text" in all_text
+
+
+def test_bare_body_text_has_correct_provenance():
+    html = "<html><body>Direct body text</body></html>"
+    result = run(html)
+    body_text_segs = [
+        s for s in result.segments
+        if s.provenance == Provenance.VISIBLE_BODY and "body" in (s.source_element or "")
+    ]
+    assert len(body_text_segs) >= 1

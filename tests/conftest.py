@@ -7,19 +7,33 @@ Integration tests require a live PostgreSQL instance.  Set TEST_DATABASE_URL
 in the environment (or .env.test) to point at a throwaway database.  If the
 variable is absent, integration tests are skipped automatically.
 
-Unit tests (normalization logic) have no database dependency.
+Unit tests (normalization logic) have no database dependency and always run.
+
+Integration test isolation
+--------------------------
+Each test that writes to the database runs inside its own connection with
+a nested transaction (SAVEPOINT).  The outer connection is rolled back after
+every test so no data persists between tests.  This means:
+
+  - The db_session fixture provides the outer connection/savepoint.
+  - The client fixture patches the app's session factory to yield sessions
+    on the SAME connection, so their writes are also rolled back.
 """
 
 from __future__ import annotations
 
 import os
 from typing import AsyncGenerator
-from unittest.mock import AsyncMock
 
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import (
+    AsyncConnection,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
 
 # ---------------------------------------------------------------------------
 # Environment
@@ -30,18 +44,26 @@ TEST_DATABASE_URL = os.environ.get(
     "postgresql+asyncpg://llmx:changeme@localhost:5432/llmx_test",
 )
 
-# Marker used to skip integration tests when no DB is available.
-pytest.register_mark = lambda *a, **kw: None  # suppress unknown-mark warnings
+TEST_API_KEY = "test-api-key-for-integration-tests-only"
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    config.addinivalue_line(
+        "markers",
+        "integration: mark test as requiring a live database (skipped when TEST_DATABASE_URL absent)",
+    )
 
 
 # ---------------------------------------------------------------------------
-# Fixtures: database
+# Fixtures: database (session-scoped engine, function-scoped isolation)
 # ---------------------------------------------------------------------------
 
 
 @pytest_asyncio.fixture(scope="session")
 async def db_engine():
-    """Create the test database schema once per session."""
+    """
+    Create the test database schema once per session, tear it down at the end.
+    """
     from backend.app.db.base import Base
     import backend.app.db.models  # noqa: F401 — register all models
 
@@ -56,51 +78,66 @@ async def db_engine():
 
 
 @pytest_asyncio.fixture
-async def db_session(db_engine) -> AsyncGenerator[AsyncSession, None]:
-    """Yield a session wrapped in a savepoint that rolls back after the test."""
-    factory = async_sessionmaker(db_engine, expire_on_commit=False, autoflush=False)
-    async with factory() as session:
-        async with session.begin():
-            yield session
-            await session.rollback()
+async def db_connection(db_engine) -> AsyncGenerator[AsyncConnection, None]:
+    """
+    Yield a single connection with an open transaction.
+    Rolls back after the test — nothing is committed to the database.
+    """
+    async with db_engine.connect() as conn:
+        await conn.begin()
+        yield conn
+        await conn.rollback()
+
+
+@pytest_asyncio.fixture
+async def db_session(db_connection: AsyncConnection) -> AsyncGenerator[AsyncSession, None]:
+    """
+    Yield an AsyncSession bound to the test's rolled-back connection.
+    """
+    session = AsyncSession(bind=db_connection, expire_on_commit=False)
+    yield session
+    await session.close()
 
 
 # ---------------------------------------------------------------------------
 # Fixtures: FastAPI test client
 # ---------------------------------------------------------------------------
 
-TEST_API_KEY = "test-api-key-for-integration-tests-only"
-
 
 @pytest_asyncio.fixture
-async def client(db_session: AsyncSession) -> AsyncGenerator[AsyncClient, None]:
+async def client(db_connection: AsyncConnection) -> AsyncGenerator[AsyncClient, None]:
     """
-    AsyncClient wired to the FastAPI app with the test DB session injected.
+    AsyncClient wired to the FastAPI app.
 
-    The app's lifespan is bypassed so we control the DB session directly.
+    The app's get_db dependency is patched to yield sessions that share the
+    test connection, so all writes are rolled back after the test.
     """
     import backend.app.db.session as db_session_module
     from backend.app.config import get_settings
     from backend.app.main import create_app
 
-    # Patch the module-level session factory used by get_db().
-    test_factory = async_sessionmaker(
-        db_session.get_bind(),  # type: ignore[arg-type]
-        expire_on_commit=False,
-        autoflush=False,
-        class_=AsyncSession,
-    )
+    # Build a factory that always creates sessions on the test connection.
+    # Each call yields a new AsyncSession on the same underlying connection,
+    # so all requests within the test share the rolled-back transaction.
+    def make_test_factory() -> async_sessionmaker[AsyncSession]:
+        return async_sessionmaker(
+            bind=db_connection,
+            expire_on_commit=False,
+            autoflush=False,
+            class_=AsyncSession,
+        )
+
     original_factory = db_session_module._session_factory
-    db_session_module._session_factory = test_factory
+    db_session_module._session_factory = make_test_factory()
 
-    # Override settings to inject the test API key.
-    os.environ.setdefault("DATABASE_URL", TEST_DATABASE_URL)
+    # Inject test config values.
+    original_db_url = os.environ.get("DATABASE_URL")
+    original_api_key = os.environ.get("INGESTION_API_KEY")
+    os.environ["DATABASE_URL"] = TEST_DATABASE_URL
     os.environ["INGESTION_API_KEY"] = TEST_API_KEY
-
     get_settings.cache_clear()
 
     app = create_app()
-
     transport = ASGITransport(app=app)
     async with AsyncClient(
         transport=transport,
@@ -109,13 +146,21 @@ async def client(db_session: AsyncSession) -> AsyncGenerator[AsyncClient, None]:
     ) as ac:
         yield ac
 
-    # Restore state.
+    # ── Teardown: restore original state ─────────────────────────────────────
     db_session_module._session_factory = original_factory
+    if original_db_url is None:
+        os.environ.pop("DATABASE_URL", None)
+    else:
+        os.environ["DATABASE_URL"] = original_db_url
+    if original_api_key is None:
+        os.environ.pop("INGESTION_API_KEY", None)
+    else:
+        os.environ["INGESTION_API_KEY"] = original_api_key
     get_settings.cache_clear()
 
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Helpers (plain functions, not fixtures)
 # ---------------------------------------------------------------------------
 
 
@@ -137,14 +182,3 @@ def minimal_ingest_payload(
         "extension_version": "1.0.0",
         "captured_at": "2026-03-15T12:00:00Z",
     }
-
-
-# ---------------------------------------------------------------------------
-# Fixtures wrapping helpers (for tests that receive them via pytest injection)
-# ---------------------------------------------------------------------------
-
-
-@pytest.fixture
-def minimal_ingest_payload_fixture():
-    """Pytest fixture version of minimal_ingest_payload."""
-    return minimal_ingest_payload

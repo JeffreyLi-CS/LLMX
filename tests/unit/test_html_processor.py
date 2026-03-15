@@ -204,3 +204,70 @@ def test_empty_html():
     assert result.title is None
     assert result.visible_blocks == []
     assert result.html_comments == []
+
+
+# ---------------------------------------------------------------------------
+# Body-level bare text nodes (regression: these were silently dropped)
+# ---------------------------------------------------------------------------
+
+
+def test_bare_text_directly_under_body_is_captured():
+    html = "<html><body>Inject me\n<p>Normal para</p></body></html>"
+    result = process_html(html)
+    all_text = " ".join(b.text for b in result.visible_blocks)
+    assert "Inject me" in all_text
+
+
+def test_bare_body_text_not_double_counted_with_paragraph():
+    html = "<html><body>Top text<p>Para text</p></body></html>"
+    result = process_html(html)
+    texts = [b.text for b in result.visible_blocks]
+    # "Top text" should appear exactly once, not twice.
+    combined = " | ".join(texts)
+    assert combined.count("Top text") == 1
+    assert combined.count("Para text") == 1
+
+
+def test_inline_text_inside_paragraph_not_double_counted():
+    # Inline <span> text inside a <p> must appear once (in the p's segment),
+    # not as a separate body#text segment.
+    html = "<html><body><p>Before <span>inline</span> after</p></body></html>"
+    result = process_html(html)
+    texts = [b.text for b in result.visible_blocks]
+    combined = " | ".join(texts)
+    assert combined.count("inline") == 1
+
+
+# ---------------------------------------------------------------------------
+# Off-screen position detection — threshold correctness
+# ---------------------------------------------------------------------------
+
+
+def test_small_negative_position_not_flagged_as_offscreen():
+    # -1px and -2em are used for legitimate micro-adjustments, not injection.
+    html = '<html><body><div style="left: -1px">micro-adjust</div></body></html>'
+    result = process_html(html)
+    # Should NOT be classified as hidden via offscreen.
+    for h in result.hidden_elements:
+        assert "offscreen" not in h.reason, f"False positive offscreen for -1px: {h}"
+
+
+def test_two_digit_negative_position_not_flagged_as_offscreen():
+    html = '<html><body><p style="top: -99px">slightly up</p></body></html>'
+    result = process_html(html)
+    for h in result.hidden_elements:
+        assert "offscreen" not in h.reason
+
+
+def test_large_negative_position_flagged_as_offscreen():
+    html = '<html><body><div style="left: -9999px">off screen</div></body></html>'
+    result = process_html(html)
+    hidden_texts = [h.text for h in result.hidden_elements]
+    assert any("off screen" in t for t in hidden_texts)
+    assert any("offscreen" in h.reason for h in result.hidden_elements)
+
+
+def test_negative_position_100_flagged():
+    html = '<html><body><span style="top: -100px">gone</span></body></html>'
+    result = process_html(html)
+    assert any("offscreen" in h.reason for h in result.hidden_elements)

@@ -45,6 +45,13 @@ class Settings(BaseSettings):
     # ── Ingestion limits ──────────────────────────────────────────────────────
     max_html_size_bytes: int = 5 * 1024 * 1024   # 5 MB
     max_selected_text_bytes: int = 64 * 1024      # 64 KB
+    # ASGI-layer hard cap on raw request body bytes (before JSON decoding).
+    # Protects against large-payload DoS before any application logic runs.
+    # Production deployments should ALSO configure this at the reverse proxy.
+    max_request_body_size_bytes: int = 6 * 1024 * 1024  # 6 MB (slightly above HTML cap)
+    # Maximum number of segments produced per ingestion.  Pages that produce
+    # more are truncated with a warning so one large page can't exhaust memory.
+    max_segments_per_ingestion: int = 2000
 
     @model_validator(mode="after")
     def _validate_secrets(self) -> Settings:

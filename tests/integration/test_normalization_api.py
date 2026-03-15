@@ -10,6 +10,7 @@ import os
 import uuid
 
 import pytest
+from tests.conftest import minimal_ingest_payload
 
 pytestmark = pytest.mark.skipif(
     not os.environ.get("TEST_DATABASE_URL"),
@@ -24,8 +25,6 @@ pytestmark = pytest.mark.skipif(
 
 async def ingest(client, page_html: str, selected_text: str | None = None) -> str:
     """Ingest a page and return the ingestion_id."""
-    from tests.conftest import minimal_ingest_payload
-
     payload = minimal_ingest_payload(page_html=page_html, selected_text=selected_text)
     resp = await client.post("/api/v1/ingest", json=payload)
     assert resp.status_code == 201, resp.text

@@ -15,6 +15,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from backend.app.api.v1.router import api_v1_router
+from backend.app.body_limit import BodySizeLimitMiddleware
 from backend.app.config import get_settings
 from backend.app.db.session import close_engine, init_engine
 from backend.app.logging_config import configure_logging
@@ -58,6 +59,11 @@ def create_app() -> FastAPI:
     )
 
     # ── Middleware (order matters: outermost is applied first/last) ────────────
+    # Body size limit — must be outermost so it fires before any body reading.
+    application.add_middleware(
+        BodySizeLimitMiddleware,
+        max_bytes=settings.max_request_body_size_bytes,
+    )
     # CORS — restrictive by default; tighten origins before production.
     application.add_middleware(
         CORSMiddleware,

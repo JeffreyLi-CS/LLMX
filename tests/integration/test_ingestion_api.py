@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 
 import pytest
+from tests.conftest import minimal_ingest_payload
 
 pytestmark = pytest.mark.skipif(
     not os.environ.get("TEST_DATABASE_URL"),
@@ -22,23 +23,21 @@ pytestmark = pytest.mark.skipif(
 
 
 @pytest.mark.asyncio
-async def test_ingest_returns_201(client, minimal_ingest_payload):
-    payload = minimal_ingest_payload()
-    response = await client.post("/api/v1/ingest", json=payload)
+async def test_ingest_returns_201(client):
+    response = await client.post("/api/v1/ingest", json=minimal_ingest_payload())
     assert response.status_code == 201
 
 
 @pytest.mark.asyncio
-async def test_ingest_returns_ingestion_id(client, minimal_ingest_payload):
-    payload = minimal_ingest_payload()
-    response = await client.post("/api/v1/ingest", json=payload)
+async def test_ingest_returns_ingestion_id(client):
+    response = await client.post("/api/v1/ingest", json=minimal_ingest_payload())
     data = response.json()
     assert "ingestion_id" in data
     assert data["status"] == "received"
 
 
 @pytest.mark.asyncio
-async def test_ingest_with_selected_text(client, minimal_ingest_payload):
+async def test_ingest_with_selected_text(client):
     payload = minimal_ingest_payload(selected_text="I selected this text")
     response = await client.post("/api/v1/ingest", json=payload)
     assert response.status_code == 201
@@ -46,7 +45,6 @@ async def test_ingest_with_selected_text(client, minimal_ingest_payload):
 
 @pytest.mark.asyncio
 async def test_ingest_with_hidden_indicators(client):
-    from tests.conftest import minimal_ingest_payload
     payload = minimal_ingest_payload()
     payload["hidden_content_indicators"] = [
         {
@@ -60,7 +58,7 @@ async def test_ingest_with_hidden_indicators(client):
 
 
 @pytest.mark.asyncio
-async def test_ingest_response_has_x_request_id_header(client, minimal_ingest_payload):
+async def test_ingest_response_has_x_request_id_header(client):
     response = await client.post("/api/v1/ingest", json=minimal_ingest_payload())
     assert "x-request-id" in response.headers
 
@@ -71,8 +69,7 @@ async def test_ingest_response_has_x_request_id_header(client, minimal_ingest_pa
 
 
 @pytest.mark.asyncio
-async def test_ingest_missing_api_key_returns_401(client, minimal_ingest_payload):
-    # Override the client to omit the API key.
+async def test_ingest_missing_api_key_returns_401(client):
     from httpx import AsyncClient, ASGITransport
     from backend.app.main import create_app
 
@@ -84,7 +81,7 @@ async def test_ingest_missing_api_key_returns_401(client, minimal_ingest_payload
 
 
 @pytest.mark.asyncio
-async def test_ingest_wrong_api_key_returns_401(client, minimal_ingest_payload):
+async def test_ingest_wrong_api_key_returns_401(client):
     from httpx import AsyncClient, ASGITransport
     from backend.app.main import create_app
 
@@ -131,15 +128,14 @@ async def test_ingest_missing_dom_metadata_returns_422(client):
 
 
 @pytest.mark.asyncio
-async def test_ingest_whitespace_only_selected_text_normalised(client, minimal_ingest_payload):
-    # Whitespace-only selected_text should be silently coerced to null.
+async def test_ingest_whitespace_only_selected_text_normalised(client):
     payload = minimal_ingest_payload(selected_text="   ")
     response = await client.post("/api/v1/ingest", json=payload)
     assert response.status_code == 201
 
 
 # ---------------------------------------------------------------------------
-# Health check
+# Health check (no auth required)
 # ---------------------------------------------------------------------------
 
 
