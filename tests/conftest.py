@@ -22,6 +22,7 @@ every test so no data persists between tests.  This means:
 
 from __future__ import annotations
 
+import asyncio
 import os
 from typing import AsyncGenerator
 
@@ -30,10 +31,12 @@ import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import (
     AsyncConnection,
+    AsyncEngine,
     AsyncSession,
     async_sessionmaker,
     create_async_engine,
 )
+from sqlalchemy.pool import NullPool
 
 # ---------------------------------------------------------------------------
 # Environment
@@ -59,22 +62,47 @@ def pytest_configure(config: pytest.Config) -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest_asyncio.fixture(scope="session")
-async def db_engine():
+@pytest.fixture(scope="session")
+def db_engine() -> AsyncEngine:
     """
     Create the test database schema once per session, tear it down at the end.
+
+    Synchronous fixture to avoid pytest-asyncio scope-mismatch errors when a
+    session-scoped fixture is requested from a function-scoped event-loop runner.
+    The async setup/teardown runs in dedicated short-lived event loops so the
+    engine object can be safely passed to function-scoped async fixtures.
     """
     from backend.app.db.base import Base
     import backend.app.db.models  # noqa: F401 — register all models
 
-    engine = create_async_engine(TEST_DATABASE_URL, echo=False)
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.drop_all)
-        await conn.run_sync(Base.metadata.create_all)
+    # NullPool prevents asyncpg from caching connections across event loops.
+    # Without it, connections created in the setup loop are reused in test loops,
+    # causing "Future attached to a different loop" errors.
+    engine = create_async_engine(TEST_DATABASE_URL, echo=False, poolclass=NullPool)
+
+    async def _setup() -> None:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.drop_all)
+            await conn.run_sync(Base.metadata.create_all)
+
+    async def _teardown() -> None:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.drop_all)
+        await engine.dispose()
+
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(_setup())
+    finally:
+        loop.close()
+
     yield engine
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.drop_all)
-    await engine.dispose()
+
+    loop2 = asyncio.new_event_loop()
+    try:
+        loop2.run_until_complete(_teardown())
+    finally:
+        loop2.close()
 
 
 @pytest_asyncio.fixture

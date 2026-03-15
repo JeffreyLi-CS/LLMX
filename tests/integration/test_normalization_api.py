@@ -144,6 +144,37 @@ async def test_normalize_invalid_uuid_returns_422(client):
 
 
 # ---------------------------------------------------------------------------
+# Retry endpoint
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_retry_non_error_state_returns_409(client):
+    """Retrying a freshly-ingested (received) record must return 409."""
+    iid = await ingest(client, "<html><body><p>hello</p></body></html>")
+    response = await client.post(f"/api/v1/normalize/{iid}/retry")
+    assert response.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_retry_already_normalized_returns_409(client):
+    """Retrying a successfully-normalized record must return 409."""
+    iid = await ingest(client, "<html><body><p>hello</p></body></html>")
+    first = await client.post(f"/api/v1/normalize/{iid}")
+    assert first.status_code == 200
+    retry = await client.post(f"/api/v1/normalize/{iid}/retry")
+    assert retry.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_retry_unknown_id_returns_404(client):
+    import uuid
+    fake_id = str(uuid.uuid4())
+    response = await client.post(f"/api/v1/normalize/{fake_id}/retry")
+    assert response.status_code == 404
+
+
+# ---------------------------------------------------------------------------
 # Authentication
 # ---------------------------------------------------------------------------
 

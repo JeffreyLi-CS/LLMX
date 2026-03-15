@@ -30,15 +30,73 @@ from backend.app.normalization.models import SuspiciousIndicator, SuspiciousIndi
 # Compiled patterns
 # ---------------------------------------------------------------------------
 
-# Base64: at least 24 contiguous base64url-alphabet characters optionally
-# ending with 1-2 '=' pads.  We require ≥24 chars to avoid matching normal
-# short alphanumeric strings.
+# Base64: candidate match — at least 40 chars.  The secondary filter
+# _is_likely_base64() then rejects common benign strings (UUIDs, hex digests,
+# monotone alpha runs, JWT headers, Google Analytics IDs, etc.).
+#
+# Rationale for 40-char minimum (≥ 30 bytes encoded):
+#   - UUID hex without dashes: 32 chars — excluded
+#   - SHA-1 hex: 40 chars but hex-only alphabet → filtered by char distribution
+#   - GA tracking IDs, CSP nonces: typically < 40 chars or all-lowercase hex
+#   - Real base64 payloads start at ≥12 bytes → ≥16 chars; raising to 40 chars
+#     means ≥30 bytes — still catches meaningful short injections while cutting
+#     the FP rate dramatically on analytics strings and identifiers.
 _RE_BASE64 = re.compile(
-    r"(?<![A-Za-z0-9+/])"       # not preceded by base64 char (avoids partial matches)
-    r"[A-Za-z0-9+/]{24,}"       # body
+    r"(?<![A-Za-z0-9+/])"       # not preceded by base64 char
+    r"[A-Za-z0-9+/]{40,}"       # body (≥40 chars)
     r"={0,2}"                    # optional padding
     r"(?![A-Za-z0-9+/=])",      # not followed by base64 char
 )
+
+
+def _is_likely_base64(s: str) -> bool:
+    """
+    Secondary heuristic filter applied after the regex match.
+
+    Rejects common benign strings that happen to match the base64 alphabet:
+    - All lowercase or all uppercase hex digests (SHA/MD5/UUID without dashes).
+    - Strings whose length (ignoring trailing =) is NOT a multiple of 4
+      after alignment (strict base64 is always aligned to 4).
+    - Strings with very skewed char-class distribution (monotone lowercase
+      alpha runs, pure digit runs, etc.) that are unlikely to be real base64.
+
+    Real base64 output of even a few bytes has a mix of upper, lower, digits,
+    and often + or /.
+    """
+    body = s.rstrip("=")
+    body_len = len(body)
+
+    # Length must be divisible by 4 (ignoring padding) OR the full string
+    # (including =) must be.  Canonical base64 is always length % 4 == 0.
+    full_len = len(s)
+    if full_len % 4 != 0:
+        return False
+
+    # Reject pure-hex strings (all chars in [0-9a-fA-F]): these are typically
+    # SHA/MD5 digests, UUIDs, or tracking IDs — not base64 payloads.
+    if all(c in "0123456789abcdefABCDEF" for c in body):
+        return False
+
+    # Require a mix of at least two distinct character classes:
+    # uppercase, lowercase, digits.  Real base64 almost always hits all three.
+    has_upper = any(c.isupper() for c in body)
+    has_lower = any(c.islower() for c in body)
+    has_digit = any(c.isdigit() for c in body)
+
+    class_count = int(has_upper) + int(has_lower) + int(has_digit)
+    if class_count < 2:
+        return False
+
+    # Reject if the string is ≥ 90% a single character class (e.g. all-lower
+    # alphabetic run like a CSS class name or slug).
+    lower_ratio = sum(1 for c in body if c.islower()) / body_len
+    upper_ratio = sum(1 for c in body if c.isupper()) / body_len
+    digit_ratio = sum(1 for c in body if c.isdigit()) / body_len
+
+    if lower_ratio >= 0.9 or upper_ratio >= 0.9 or digit_ratio >= 0.9:
+        return False
+
+    return True
 
 # Percent encoding: 3+ consecutive %XX sequences (URL / URI encoding).
 _RE_PERCENT_ENC = re.compile(r"(?:%[0-9A-Fa-f]{2}){3,}")
@@ -112,8 +170,13 @@ def detect_obfuscation(text: str) -> list[SuspiciousIndicator]:
 
     for pattern, indicator_type, description in _PATTERNS:
         for m in pattern.finditer(text):
+            value = m.group()
+            # Extra filter for base64 candidates to reduce false positives.
+            if indicator_type == SuspiciousIndicatorType.POSSIBLE_BASE64:
+                if not _is_likely_base64(value):
+                    continue
             raw_matches.append(
-                (m.start(), m.end(), indicator_type, description, m.group())
+                (m.start(), m.end(), indicator_type, description, value)
             )
 
     if not raw_matches:

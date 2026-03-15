@@ -12,7 +12,6 @@ import uuid
 import structlog
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
 
 from backend.app.db.models.ingestion import IngestionRecord
 from backend.app.db.models.normalized_segment import NormalizedSegmentRecord
@@ -47,7 +46,6 @@ async def normalize_ingestion(
     result = await db.execute(
         select(IngestionRecord)
         .where(IngestionRecord.id == ingestion_id)
-        .options(selectinload(IngestionRecord.segments))
         .with_for_update()
     )
     record: IngestionRecord | None = result.scalar_one_or_none()
@@ -123,3 +121,51 @@ async def normalize_ingestion(
     )
 
     return norm_result
+
+
+async def retry_normalize_ingestion(
+    ingestion_id: uuid.UUID,
+    db: AsyncSession,
+    max_segments: int = 2000,
+) -> NormalizationResult:
+    """
+    Retry normalization for an ingestion that previously failed with status
+    ``error``.
+
+    Resets the record to ``received`` and re-runs the pipeline.  Only
+    ingestions in ``error`` state are accepted; all other states raise
+    ``NormalizationError``.
+    """
+    result = await db.execute(
+        select(IngestionRecord)
+        .where(IngestionRecord.id == ingestion_id)
+        .with_for_update()
+    )
+    record: IngestionRecord | None = result.scalar_one_or_none()
+
+    if record is None:
+        raise NormalizationError(f"Ingestion {ingestion_id} not found")
+
+    if record.status != "error":
+        raise NormalizationError(
+            f"Ingestion {ingestion_id} cannot be retried: status is '{record.status}' "
+            "(only 'error' state ingestions can be retried)"
+        )
+
+    logger.info(
+        "normalization.retry.started",
+        ingestion_id=str(ingestion_id),
+        previous_error=record.normalization_error,
+    )
+
+    record.status = "received"
+    record.normalization_error = None
+    await db.flush()
+
+    # Delegate to the main normalization function; the record is now in
+    # "received" state so it will proceed through the normal path.
+    return await normalize_ingestion(
+        ingestion_id=ingestion_id,
+        db=db,
+        max_segments=max_segments,
+    )

@@ -258,6 +258,16 @@ def _extract_hidden(soup: BeautifulSoup) -> tuple[list[HiddenElement], set[int]]
         is_hidden, reason = _is_hidden(tag)
         if is_hidden:
             text = tag.get_text(separator=" ", strip=True)
+            # Skip purely decorative / icon elements: aria-hidden or class-based
+            # hiding of content that is 1-2 chars (e.g. icon glyphs, ✓, ×).
+            # These are legitimate accessibility patterns, not injection surfaces.
+            # Hard CSS hiding (display:none, visibility:hidden, html[hidden]) is
+            # always flagged regardless of text length.
+            if text and len(text) <= 2 and reason.startswith(("aria-hidden", "class:")):
+                hidden_tag_ids.add(tag_id)
+                for descendant in tag.find_all(True):
+                    hidden_tag_ids.add(id(descendant))
+                continue
             if text:
                 results.append(
                     HiddenElement(

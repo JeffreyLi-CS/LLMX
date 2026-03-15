@@ -57,7 +57,7 @@ def upgrade() -> None:
             "hidden_indicators",
             postgresql.JSONB(astext_type=sa.Text()),
             nullable=False,
-            server_default="'[]'::jsonb",
+            server_default=sa.text("'[]'::jsonb"),
         ),
         # Processing state
         sa.Column(
@@ -109,7 +109,7 @@ def upgrade() -> None:
             "suspicious_indicators",
             postgresql.JSONB(astext_type=sa.Text()),
             nullable=False,
-            server_default="'[]'::jsonb",
+            server_default=sa.text("'[]'::jsonb"),
         ),
     )
 

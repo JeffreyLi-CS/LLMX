@@ -21,7 +21,11 @@ from fastapi import APIRouter, HTTPException, Path, status
 
 from backend.app.dependencies import DBSession, RequireAPIKey, SettingsDep
 from backend.app.normalization.models import NormalizationResult
-from backend.app.normalization.service import NormalizationError, normalize_ingestion
+from backend.app.normalization.service import (
+    NormalizationError,
+    normalize_ingestion,
+    retry_normalize_ingestion,
+)
 
 logger: structlog.stdlib.BoundLogger = structlog.get_logger(__name__)
 
@@ -69,6 +73,44 @@ async def normalize(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Normalization failed: {msg}",
+        ) from exc
+
+    return result
+
+
+@router.post(
+    "/normalize/{ingestion_id}/retry",
+    response_model=NormalizationResult,
+    status_code=status.HTTP_200_OK,
+    dependencies=[RequireAPIKey],
+    summary="Retry normalization for a failed ingestion",
+    description=(
+        "Re-runs the normalization pipeline for an ingestion that previously "
+        "reached 'error' state.  Returns 409 if the ingestion is not in error "
+        "state (e.g. already normalized or still processing)."
+    ),
+)
+async def retry_normalize(
+    ingestion_id: IngestionIDPath,
+    db: DBSession,
+    settings: SettingsDep,
+) -> NormalizationResult:
+    try:
+        result = await retry_normalize_ingestion(
+            ingestion_id=ingestion_id,
+            db=db,
+            max_segments=settings.max_segments_per_ingestion,
+        )
+    except NormalizationError as exc:
+        msg = str(exc)
+        if "not found" in msg.lower():
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=msg,
+            ) from exc
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=msg,
         ) from exc
 
     return result
